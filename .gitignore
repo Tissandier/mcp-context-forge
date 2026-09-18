@@ -369,3 +369,6 @@ tests/jmeter/results/*.jtl
 tests/jmeter/results/*/
 .jmeter/
 zen-jwt-public.pem
+
+.env.local
+charts/mcp-stack/values-personal.yaml

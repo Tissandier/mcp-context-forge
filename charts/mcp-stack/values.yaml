@@ -966,12 +966,12 @@ mcpContextForge:
     SSO_ADFS_ENABLED: "false"
     # IBM Cloud Pak (Zen) SSO:
     SSO_ZEN_ENABLED: "true"
-    SSO_ZEN_CPD_HOST: "cpd-mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
+    SSO_ZEN_CPD_HOST: "cpd.apps.example.com"
     SSO_ZEN_DISPLAY_NAME: "IBM Cloud Pak for Data"
     SSO_ZEN_EMAIL_DOMAIN: "cpd.local"
     SSO_ZEN_GROUPS_CLAIM: "groups"
     SSO_ZEN_PUBLIC_KEY_PATH: "/etc/zen-jwt/public.pem"
-    SSO_ZEN_CF_CALLBACK_BASE: "https://mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
+    SSO_ZEN_CF_CALLBACK_BASE: "https://mcp-gateway.apps.example.com"
     # See .env.example for full SSO_*_CLIENT_ID, SSO_*_CLIENT_SECRET, etc.
 
     # ─ Default Role Configuration ─
@@ -2139,8 +2139,8 @@ inspector:
 ########################################################################
 zen:
   enabled: true
-  cpdHost: "cpd-mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
-  cfHost: "mcp-gateway.apps.manutiss.cp.fyre.ibm.com"  # CF external hostname (for Host header in proxy_pass)
+  cpdHost: "cpd.apps.example.com"
+  cfHost: "mcp-gateway.apps.example.com"  # CF external hostname (for Host header in proxy_pass)
   namespace: "mcp-gateway"
   emailDomain: "cpd.local"
   defaultRole: ""       # default CF role for CPD users, e.g. "viewer"
