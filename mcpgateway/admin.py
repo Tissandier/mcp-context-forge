@@ -4995,6 +4995,25 @@ async def _admin_logout(request: Request) -> Response:
 
         return f"{logout_endpoint}?{urllib.parse.urlencode(query_params)}"
 
+    def _build_zen_logout_url(root_path: str) -> Optional[str]:
+        """Build IBM Cloud Pak for Data (Zen) logout URL.
+
+        Redirects through CPD's logout endpoint to clear the Zen session cookie
+        and terminate the CPD SSO session.
+
+        Args:
+            root_path (str): Application root path from request scope.
+
+        Returns:
+            Optional[str]: Zen logout URL when CPD host is configured, otherwise ``None``.
+        """
+        if not getattr(settings, "sso_zen_enabled", False):
+            return None
+        cpd_host = getattr(settings, "sso_zen_cpd_host", "") or ""
+        if not cpd_host:
+            return None
+        return f"https://{cpd_host.strip()}/auth/doLogout"
+
     LOGGER.info(f"Admin user logging out (method: {request.method})")
     root_path = _resolve_root_path(request)
 
@@ -5077,6 +5096,11 @@ async def _admin_logout(request: Request) -> Response:
             if keycloak_logout_url:
                 LOGGER.info("Redirecting to Keycloak RP-initiated logout endpoint")
                 response = RedirectResponse(url=keycloak_logout_url, status_code=303)
+        elif auth_provider == "zen":
+            zen_logout_url = _build_zen_logout_url(root_path)
+            if zen_logout_url:
+                LOGGER.info("Redirecting to Zen/CPD logout endpoint: %s", zen_logout_url)
+                response = RedirectResponse(url=zen_logout_url, status_code=303)
 
     # Always clear local JWT session cookie.
     clear_auth_cookie(response)

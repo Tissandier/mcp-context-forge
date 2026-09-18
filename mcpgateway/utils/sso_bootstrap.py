@@ -326,6 +326,35 @@ def get_predefined_sso_providers() -> List[Dict]:
             }
         )
 
+    # IBM Cloud Pak for Data (Zen) SSO Provider
+    if getattr(settings, "sso_zen_enabled", False) and getattr(settings, "sso_zen_cpd_host", None):
+        display_name = getattr(settings, "sso_zen_display_name", None) or "IBM Cloud Pak for Data"
+        providers.append(
+            {
+                "id": "zen",
+                "name": "zen",
+                "display_name": display_name,
+                "provider_type": "zen",
+                "client_id": "zen",
+                "client_secret": "",
+                "authorization_url": f"https://{settings.sso_zen_cpd_host}/zen/auth/sso/callback/zen",
+                "token_url": "",
+                "userinfo_url": "",
+                "issuer": f"https://{settings.sso_zen_cpd_host}",
+                "scope": "",
+                "trusted_domains": settings.sso_trusted_domains,
+                "auto_create_users": settings.sso_auto_create_users,
+                "team_mapping": {},
+                "provider_metadata": {
+                    "cpd_host": settings.sso_zen_cpd_host,
+                    "email_domain": getattr(settings, "sso_zen_email_domain", "cpd.local"),
+                    "groups_claim": getattr(settings, "sso_zen_groups_claim", "groups"),
+                    "default_role": getattr(settings, "sso_zen_default_role", None),
+                    "role_mappings": getattr(settings, "sso_zen_role_mappings", {}),
+                },
+            }
+        )
+
     # Generic OIDC Provider (Keycloak, Auth0, Authentik, etc.)
     if settings.sso_generic_enabled and settings.sso_generic_client_id and settings.sso_generic_provider_id:
         provider_id = settings.sso_generic_provider_id

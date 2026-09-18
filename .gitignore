@@ -363,3 +363,9 @@ tools_rust/mcp_runtime/perf.data*
 
 # Git worktrees
 .worktrees/
+
+# JMeter test results and local installation
+tests/jmeter/results/*.jtl
+tests/jmeter/results/*/
+.jmeter/
+zen-jwt-public.pem

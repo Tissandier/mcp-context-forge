@@ -1,0 +1,59 @@
+{{- if or (and .Values.zen .Values.zen.enabled) (and .Values.mcpContextForge.sso .Values.mcpContextForge.sso.zen .Values.mcpContextForge.sso.zen.enabled) }}
+{{- $cfSvc := printf "http://%s-mcpgateway.%s.svc.cluster.local:80" (include "mcp-stack.fullname" .) .Release.Namespace }}
+{{- $cfHost := .Values.zen.cfHost | default (printf "%s-mcpgateway.%s.svc.cluster.local" (include "mcp-stack.fullname" .) .Release.Namespace) }}
+{{- $locationConf := `location /zen/auth/sso/callback/zen {
+    content_by_lua_block {
+        local ck = require 'resty.cookie'
+        local cookie, err = ck:new()
+        if not cookie then
+            return ngx.exec('/auth/login/sso')
+        end
+        local token, _ = cookie:get('ibm-private-cloud-session')
+        if not token or token == '' then
+            -- No CPD session yet. Set __preloginurl__ so usermgmt redirects
+            -- back to this exact URI (with state and cf_host) after login.
+            -- ngx.exec is an internal rewrite (browser URL unchanged) so the
+            -- __preloginurl__ cookie is present when /ua_legacy/signin POSTs,
+            -- matching how verify-jwt.lua handles unauthenticated requests.
+            cookie:set({
+                key = '__preloginurl__',
+                value = ngx.var.request_uri,
+                path = '/',
+                secure = true,
+                samesite = 'Lax',
+                httponly = true,
+                max_age = 3600
+            })
+            return ngx.exec('/auth/login/sso')
+        end
+        -- Redirect the browser directly to the CF callback URL.
+        -- proxy_pass cannot be used here: Set-Cookie headers from CF would be
+        -- served under the CPD domain and ignored by the browser.
+        -- A browser redirect ensures CF's cookies land on the CF domain.
+        local state   = ngx.escape_uri(ngx.var.arg_state or '')
+        local cf_host = ngx.unescape_uri(ngx.var.arg_cf_host or '')
+        local target  = cf_host .. '/auth/sso/callback/zen?state=' .. state .. '&token=' .. ngx.escape_uri(token)
+        return ngx.redirect(target, 302)
+    }
+}` | replace "CF_SVC_PLACEHOLDER" $cfSvc | replace "CF_HOST_PLACEHOLDER" $cfHost }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcp-stack.fullname" . }}-zen-frontdoor-extension
+  namespace: mcp-gateway
+  labels:
+    {{- include "mcp-stack.labels" . | nindent 4 }}
+    icpdata_addon: "true"
+    icpdata_addon_version: "4.8.13"
+data:
+  extensions: |
+    [
+      {
+        "extension_point_id": "zen_front_door",
+        "extension_name": "cf-sso-callback",
+        "details": {
+          "location_conf": "{{ $locationConf | b64enc }}"
+        }
+      }
+    ]
+{{- end }}

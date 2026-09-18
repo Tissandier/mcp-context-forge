@@ -97,6 +97,7 @@
 
             <!-- Email/Password Form -->
             <form
+              id="email-login-form"
               class="space-y-4"
               action="{{ root_path }}/admin/login"
               method="post"
@@ -450,6 +451,14 @@
             "bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-800",
           textColor: "text-white",
         },
+        zen: {
+          name: "IBM Cloud Pak for Automation",
+          icon: "fas fa-cloud",
+          bgColor:
+            "bg-blue-700 hover:bg-blue-800 dark:bg-blue-800 dark:hover:bg-blue-900",
+          textColor: "text-white",
+          redirectDirect: true,
+        },
       };
 
       // Initialize page
@@ -499,6 +508,15 @@
             return;
           }
 
+          // When Zen/CPD SSO is enabled, hide the local email/password login form and divider
+          const hasZen = providers.some((p) => p.id === "zen");
+          if (hasZen) {
+            const divider = document.getElementById("divider");
+            if (divider) divider.style.display = "none";
+            const emailForm = document.getElementById("email-login-form");
+            if (emailForm) emailForm.style.display = "none";
+          }
+
           providers.forEach((provider) => {
             // Use predefined config or fallback to generic OIDC styling
             const config = ssoProviders[provider.id] || {
@@ -535,6 +553,13 @@
 
       // Initiate SSO authentication
       async function initiateSSO(providerId) {
+        // Redirect-direct providers (e.g. Zen/CPD) skip the JSON fetch and go straight to the login URL
+        const providerConfig = ssoProviders[providerId];
+        if (providerConfig && providerConfig.redirectDirect) {
+          window.location.href = window.ROOT_PATH + `/auth/sso/login/${providerId}`;
+          return;
+        }
+
         try {
           const redirectUri =
             window.location.origin + window.ROOT_PATH + `/auth/sso/callback/${providerId}`;

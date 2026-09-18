@@ -9,8 +9,9 @@ Handles SSO login flows, provider configuration, and callback handling.
 
 # Standard
 import secrets
+import urllib.parse
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # Third-Party
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -248,6 +249,275 @@ def _validate_redirect_uri(redirect_uri: str, request: Request | None = None) ->
                 return True
 
     return False
+
+
+@sso_router.get("/login/zen")
+async def initiate_zen_sso_login(
+    request: Request,
+    response: Response,
+):
+    """Initiate Zen/CPD SSO login flow.
+
+    Generates CSRF state, stores it in a short-lived signed/HTTP-only cookie,
+    and redirects the browser to the CPD callback path where CPD nginx intercepts
+    unauthenticated requests and redirects to the CPD login page.
+
+    Args:
+        request: FastAPI request object
+        response: FastAPI response object
+
+    Returns:
+        RedirectResponse to CPD callback path
+    """
+    if not settings.sso_zen_enabled or not settings.sso_zen_cpd_host:
+        raise HTTPException(status_code=404, detail="Zen SSO authentication is disabled or CPD host is not configured")
+
+    state = secrets.token_urlsafe(32)
+    cpd_host = settings.sso_zen_cpd_host.strip()
+
+    # Determine CF callback base — explicit setting wins, then request.base_url
+    if hasattr(settings, "sso_zen_cf_callback_base") and settings.sso_zen_cf_callback_base:
+        cf_host = str(settings.sso_zen_cf_callback_base).rstrip("/")
+    elif hasattr(settings, "app_domain") and settings.app_domain:
+        cf_host = str(settings.app_domain).rstrip("/")
+    else:
+        # request.base_url is scheme://host[:port]/ — strip trailing slash
+        cf_host = str(request.base_url).rstrip("/")
+
+    # Build CPD callback redirect URL
+    cb_params = urllib.parse.urlencode({"state": state, "cf_host": cf_host})
+    cpd_redirect_url = f"https://{cpd_host}/zen/auth/sso/callback/zen?{cb_params}"
+
+    # Third-Party
+    from fastapi.responses import RedirectResponse
+
+    redirect_resp = RedirectResponse(url=cpd_redirect_url, status_code=302)
+
+    # The Zen SSO flow is intentionally cross-site: the browser visits the CPD
+    # domain and is redirected back to CF.  SameSite=Lax (the default) causes
+    # some browsers to suppress the cookie on that cross-site redirect, breaking
+    # CSRF validation.  SameSite=None is required here; it mandates Secure=True.
+    redirect_resp.set_cookie(
+        key="zen_sso_state",
+        value=state,
+        max_age=300,  # 5 minutes
+        httponly=True,
+        secure=True,  # SameSite=None requires Secure
+        samesite="none",
+        path=settings.app_root_path or "/",
+    )
+
+    return redirect_resp
+
+
+@sso_router.get("/login/zen/token", include_in_schema=False)
+async def zen_token_paste_page(request: Request):
+    """Render a token-paste page for local dev testing of Zen SSO (dev environment only).
+
+    In production the nginx extension proxies the CPD callback to the normal
+    /auth/sso/callback/zen endpoint with the JWT in a header.  Locally that
+    extension isn't active, so this page lets you paste the Zen JWT obtained
+    from the CPD UI and exchange it for a CF session directly.
+
+    Only available when ``environment=development``.
+    """
+    if settings.environment != "development":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    root_path = request.scope.get("root_path", "")
+    cpd_host = getattr(settings, "sso_zen_cpd_host", "") or ""
+    display_name = getattr(settings, "sso_zen_display_name", None) or "IBM Cloud Pak for Automation"
+    cpd_url = f"https://{cpd_host}" if cpd_host else "#"
+    password_key = "password"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Login with {display_name}</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; max-width: 560px; margin: 80px auto; padding: 0 20px; color: #1f2328; }}
+    h2 {{ font-size: 1.25rem; margin-bottom: 4px; }}
+    p {{ color: #57606a; font-size: .9rem; margin-bottom: 20px; }}
+    ol {{ color: #57606a; font-size: .9rem; padding-left: 20px; line-height: 1.8; }}
+    a {{ color: #3b82d4; }}
+    textarea {{ width: 100%; height: 100px; font-family: monospace; font-size: .8rem;
+               border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px;
+               box-sizing: border-box; resize: vertical; }}
+    button {{ margin-top: 12px; padding: 10px 24px; background: #1d4ed8; color: #fff;
+              border: none; border-radius: 6px; cursor: pointer; font-size: .95rem; }}
+    button:hover {{ background: #1e40af; }}
+    .note {{ margin-top: 16px; font-size: .8rem; color: #9ca3af; }}
+  </style>
+</head>
+<body>
+  <h2>Login with {display_name}</h2>
+  <p>Dev-mode token exchange — not shown in production.</p>
+  <ol>
+    <li>Open <a href="{cpd_url}/auth/login" target="_blank">{cpd_url}/auth/login</a></li>
+    <li>Log in with your CPD credentials</li>
+    <li>Open browser DevTools → Application → Cookies → find <code>ibm-private-cloud-session</code>, or run in the console:<br>
+        <code>document.cookie</code> / check Network tab for <code>Authorization</code> header</li>
+    <li>Alternatively run:<br>
+        <code>curl -sk -X POST {cpd_url}/icp4d-api/v1/authorize \\<br>
+        &nbsp;&nbsp;-H 'Content-Type: application/json' \\<br>
+        &nbsp;&nbsp;-d '{{"username":"admin","{password_key}":"&lt;YOUR_CPD_PASSWORD&gt;"}}' | python3 -m json.tool</code></li>
+    <li>Paste the <code>token</code> value below and click Login</li>
+  </ol>
+  <form method="POST" action="{root_path}/auth/sso/login/zen/token">
+    <textarea name="zen_token" placeholder="eyJhbGciOiJS..." required></textarea>
+    <br>
+    <button type="submit">Login with {display_name}</button>
+  </form>
+  <p class="note">This page is only available in development mode.</p>
+</body>
+</html>"""
+    # Standard
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(html)
+
+
+@sso_router.post("/login/zen/token", include_in_schema=False)
+async def zen_token_exchange(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Accept a Zen JWT posted from the token-paste page and create a CF session.
+
+    Dev environment only — skips the CSRF state cookie check because the
+    browser flow never went through ``/auth/sso/login/zen``.
+    """
+    # Third-Party
+    from fastapi.responses import HTMLResponse, RedirectResponse
+
+    # First-Party
+    from mcpgateway.utils.security_cookies import CookieTooLargeError, set_auth_cookie
+
+    if settings.environment != "development":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if not settings.sso_zen_enabled:
+        raise HTTPException(status_code=404, detail="Zen SSO is disabled")
+
+    root_path = request.scope.get("root_path", "")
+
+    form = await request.form()
+    zen_token = (form.get("zen_token") or "").strip()
+    if not zen_token:
+        return HTMLResponse("<p>Missing token. <a href='javascript:history.back()'>Go back</a>.</p>", status_code=400)
+
+    sso_service = SSOService(db)
+    try:
+        user_info = sso_service.handle_zen_callback(zen_token)
+    except Exception as exc:
+        logger.warning("Zen token exchange failed: %s", exc)
+        return HTMLResponse(f"<p>Token verification failed: {type(exc).__name__}. <a href='javascript:history.back()'>Go back</a>.</p>", status_code=400)
+
+    access_token = await sso_service.authenticate_or_create_user(user_info)
+    if not access_token:
+        return RedirectResponse(url=f"{root_path}/admin/login?error=user_creation_failed", status_code=302)
+
+    redirect_response = RedirectResponse(url=f"{root_path}/admin", status_code=302)
+    try:
+        set_auth_cookie(redirect_response, access_token, remember_me=False)
+    except CookieTooLargeError:
+        return RedirectResponse(url=f"{root_path}/admin/login?error=token_too_large", status_code=302)
+
+    return redirect_response
+
+
+@sso_router.get("/callback/zen")
+async def handle_zen_sso_callback(
+    request: Request,
+    state: str = Query(..., description="CSRF state parameter"),
+    token: Optional[str] = Query(None, description="Zen JWT token from browser redirect"),
+    db: Session = Depends(get_db),
+):
+    """Handle Zen/CPD SSO authentication callback.
+
+    Receives Zen JWT via query param (browser redirect flow) or Authorization / X-Zen-Token header,
+    verifies signature against the Zen public key, authenticates or creates the user,
+    and redirects to /admin with an auth cookie.
+
+    Args:
+        request: FastAPI request object
+        state: CSRF state parameter for validation
+        db: Database session
+
+    Returns:
+        RedirectResponse to /admin on success, or /admin/login?error=... on failure
+    """
+    # Third-Party
+    from fastapi.responses import RedirectResponse
+
+    # First-Party
+    from mcpgateway.utils.security_cookies import CookieTooLargeError, set_auth_cookie
+
+    root_path = request.scope.get("root_path", "") if request else ""
+
+    if not settings.sso_zen_enabled:
+        raise HTTPException(status_code=404, detail="Zen SSO authentication is disabled")
+
+    # The Zen callback is proxied by CPD nginx — the browser's origin is the CPD
+    # domain, so relative redirects would land on CPD, not CF.  Use the configured
+    # CF base URL for all redirects so the browser ends up on the right domain.
+    cf_base = str(settings.sso_zen_cf_callback_base).rstrip("/") if settings.sso_zen_cf_callback_base else ""
+
+    def _cf_redirect(path: str) -> RedirectResponse:
+        url = f"{cf_base}{root_path}{path}" if cf_base else f"{root_path}{path}"
+        return RedirectResponse(url=url, status_code=302)
+
+    # CSRF state validation: the browser carries zen_sso_state (SameSite=None)
+    # set when /auth/sso/login/zen was first called.
+    state_decoded = unquote(state)
+    state_cookie = request.cookies.get("zen_sso_state") if request else None
+    if not state_cookie or not secrets.compare_digest(state_cookie, state_decoded):
+        logger.warning("Zen SSO state validation failed")
+        return _cf_redirect("/admin/login?error=sso_failed")
+
+    # Extract Zen JWT from query param (token=...), Authorization header, or X-Zen-Token header
+    zen_token = (token or "").strip() or None
+    if not zen_token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            zen_token = auth_header[7:].strip()
+    if not zen_token:
+        zen_token = request.headers.get("X-Zen-Token", "").strip() or None
+
+    if not zen_token:
+        logger.warning("Zen SSO callback missing JWT token in query param, Authorization, or X-Zen-Token header")
+        return _cf_redirect("/admin/login?error=sso_failed")
+
+    sso_service = SSOService(db)
+    try:
+        user_info = sso_service.handle_zen_callback(zen_token)
+    except Exception as exc:
+        logger.warning("Zen SSO callback failed to verify token: %s", exc)
+        return _cf_redirect("/admin/login?error=sso_failed")
+
+    try:
+        access_token = await sso_service.authenticate_or_create_user(user_info)
+    except Exception as exc:
+        logger.warning("Zen SSO callback failed to authenticate user: %s", exc, exc_info=True)
+        return _cf_redirect("/admin/login?error=sso_failed")
+    if not access_token:
+        return _cf_redirect("/admin/login?error=user_creation_failed")
+
+    redirect_response = _cf_redirect("/admin")
+
+    # Clear state cookie
+    redirect_response.delete_cookie(
+        key="zen_sso_state",
+        path=settings.app_root_path or "/",
+    )
+
+    try:
+        set_auth_cookie(redirect_response, access_token, remember_me=False)
+    except CookieTooLargeError:
+        return _cf_redirect("/admin/login?error=token_too_large")
+
+    return redirect_response
 
 
 @sso_router.get("/login/{provider_id}", response_model=SSOLoginResponse)

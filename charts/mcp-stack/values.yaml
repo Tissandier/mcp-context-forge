@@ -947,16 +947,15 @@ mcpContextForge:
     EMBED_ENVIRONMENT_IN_TOKENS: "false"   # embed env claim in gateway-issued JWTs
     VALIDATE_TOKEN_ENVIRONMENT: "false"    # reject tokens with mismatched env claim
 
-    # ─ SSO (Single Sign-On) — all providers disabled ─
-    SSO_ENABLED: "false"                   # master switch for Single Sign-On
-    # Common SSO settings (uncomment when enabling any provider):
+    # ─ SSO (Single Sign-On) ─
+    SSO_ENABLED: "true"                    # master switch for Single Sign-On
+    SSO_PRESERVE_ADMIN_AUTH: "true"        # keep local admin login alongside SSO
     # SSO_AUTO_CREATE_USERS: "true"
     # SSO_TRUSTED_DOMAINS: "[]"
-    # SSO_PRESERVE_ADMIN_AUTH: "true"
     # SSO_REQUIRE_ADMIN_APPROVAL: "false"
     # SSO_AUTO_ADMIN_DOMAINS: "[]"
     # SSO_ISSUERS: "[]"
-    # Individual SSO providers — enable one and populate credentials:
+    # Individual SSO providers:
     SSO_GITHUB_ENABLED: "false"
     SSO_GOOGLE_ENABLED: "false"
     SSO_IBM_VERIFY_ENABLED: "false"
@@ -965,6 +964,14 @@ mcpContextForge:
     SSO_ENTRA_ENABLED: "false"
     SSO_GENERIC_ENABLED: "false"
     SSO_ADFS_ENABLED: "false"
+    # IBM Cloud Pak (Zen) SSO:
+    SSO_ZEN_ENABLED: "true"
+    SSO_ZEN_CPD_HOST: "cpd-mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
+    SSO_ZEN_DISPLAY_NAME: "IBM Cloud Pak for Data"
+    SSO_ZEN_EMAIL_DOMAIN: "cpd.local"
+    SSO_ZEN_GROUPS_CLAIM: "groups"
+    SSO_ZEN_PUBLIC_KEY_PATH: "/etc/zen-jwt/public.pem"
+    SSO_ZEN_CF_CALLBACK_BASE: "https://mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
     # See .env.example for full SSO_*_CLIENT_ID, SSO_*_CLIENT_SECRET, etc.
 
     # ─ Default Role Configuration ─
@@ -1061,9 +1068,9 @@ migration:
 
   # Use same image as mcpgateway
   image:
-    repository: ghcr.io/ibm/mcp-context-forge
-    tag: "v1.0.10"                            # Should match mcpContextForge.image.tag
-    pullPolicy: Always                      # Always pull to ensure latest security patches
+    repository: image-registry.openshift-image-registry.svc:5000/mcp-gateway/mcpgateway
+    tag: zen-jwt-v8                         # Should match mcpContextForge.image.tag
+    pullPolicy: Always                      # use Always only for dev/testing with mutable tags
 
   # Resource limits for the migration job
   resources:
@@ -2126,3 +2133,15 @@ inspector:
     requests:
       cpu: 250m
       memory: 128Mi
+
+########################################################################
+# ZEN (IBM Cloud Pak for Automation) SSO PROFILE
+########################################################################
+zen:
+  enabled: true
+  cpdHost: "cpd-mcp-gateway.apps.manutiss.cp.fyre.ibm.com"
+  cfHost: "mcp-gateway.apps.manutiss.cp.fyre.ibm.com"  # CF external hostname (for Host header in proxy_pass)
+  namespace: "mcp-gateway"
+  emailDomain: "cpd.local"
+  defaultRole: ""       # default CF role for CPD users, e.g. "viewer"
+  roleMappings: {}      # map CPD role names to CF roles, e.g. {Admin: platform_admin}

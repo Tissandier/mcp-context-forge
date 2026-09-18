@@ -114,6 +114,7 @@ class SSOService:
     _OIDC_METADATA_CACHE_TTL_SECONDS = 300
     _oidc_config_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
     _jwks_client_cache: Dict[str, _NoRedirectPyJWKClient] = {}
+    _zen_public_key: Dict[str, str] = {}
     _STATE_BINDING_SEPARATOR = "."
     _STATE_BINDING_HEX_LEN = 64
     _EMAIL_VERIFIED_CLAIMS: Tuple[str, ...] = (
@@ -2577,6 +2578,83 @@ class SSOService:
                         rollback_error,
                     )
                     break
+
+
+
+    def handle_zen_callback(self, zen_token: str) -> Dict[str, Any]:
+        """Handle and verify Zen JWT token from IBM Cloud Pak for Data.
+
+        Reads the RSA public key, verifies token signature, and maps claims
+        to a normalized user_info dictionary.
+
+        Args:
+            zen_token: Raw Zen JWT token string
+
+        Returns:
+            Normalized user_info dict
+
+        Raises:
+            ValueError: If public key cannot be read or token verification fails
+        """
+        public_key_path = settings.sso_zen_public_key_path
+        if public_key_path not in self._zen_public_key:
+            try:
+                with open(public_key_path, "r", encoding="utf-8") as key_file:
+                    self._zen_public_key[public_key_path] = key_file.read()
+            except Exception as exc:
+                logger.error("Failed to read Zen public key from %s: %s", public_key_path, exc)
+                raise ValueError(f"Failed to read Zen public key from {public_key_path}") from exc
+
+        public_key_pem = self._zen_public_key[public_key_path]
+
+        try:
+            payload = jwt.decode(
+                zen_token,
+                public_key_pem,
+                algorithms=["RS256"],
+                options={"verify_aud": False, "verify_iss": False},
+            )
+        except Exception as exc:
+            logger.warning("Zen JWT signature verification failed: %s", exc)
+            raise ValueError(f"Invalid Zen JWT token: {exc}") from exc
+
+        raw_username = payload.get("username") or payload.get("sub") or ""
+        username = str(raw_username)
+
+        email_domain = settings.sso_zen_email_domain
+        if email_domain:
+            if "@" in username:
+                email = username
+            else:
+                email = f"{username}@{email_domain}"
+        elif "@" in username:
+            email = username
+        else:
+            email = f"{username}@cpd.local"
+
+        groups_claim_name = settings.sso_zen_groups_claim or "groups"
+        raw_groups = payload.get(groups_claim_name, [])
+        if isinstance(raw_groups, list):
+            groups = [str(g) for g in raw_groups]
+        elif raw_groups:
+            groups = [str(raw_groups)]
+        else:
+            groups = []
+
+        uid = payload.get("uid") or payload.get("sub")
+        provider_id = str(uid) if uid is not None else username
+
+        return {
+            "email": email,
+            "email_verified": True,
+            "full_name": payload.get("display_name") or username,
+            "username": username,
+            "provider_id": provider_id,
+            "provider": "zen",
+            "groups": groups,
+            "role": payload.get("role"),
+        }
+
 
 
 # Module-level cache: normalized-issuer -> SSOProvider id, with a short TTL.

@@ -335,32 +335,44 @@ spec:
           resources:
 {{- toYaml .Values.mcpContextForge.resources | nindent 12 }}
 
+          {{- $hasVolumeMounts := or .Values.mcpContextForge.pluginConfig.enabled $tls.enabled (and .Values.zen .Values.zen.enabled) (and .Values.mcpContextForge.sso .Values.mcpContextForge.sso.zen .Values.mcpContextForge.sso.zen.enabled) }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-          {{- if .Values.mcpContextForge.pluginConfig.enabled }}
+            {{- if .Values.mcpContextForge.pluginConfig.enabled }}
             - name: plugin-config-volume
               mountPath: /app/{{ $pluginsConfigFile }}
               subPath: config.yaml
-          {{- end }}
-          {{- if $tls.enabled }}
+            {{- end }}
+            {{- if or (and .Values.zen .Values.zen.enabled) (and .Values.mcpContextForge.sso .Values.mcpContextForge.sso.zen .Values.mcpContextForge.sso.zen.enabled) }}
+            - name: zen-jwt-public-key
+              mountPath: /etc/zen-jwt
+              readOnly: true
+            {{- end }}
+            {{- if $tls.enabled }}
             - name: gateway-tls-certs
               mountPath: {{ $tls.mountPath | quote }}
               readOnly: true
-          {{- end }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-      {{- if .Values.mcpContextForge.pluginConfig.enabled }}
+        {{- if .Values.mcpContextForge.pluginConfig.enabled }}
         - name: plugin-config-volume
           configMap:
             name: {{ include "mcp-stack.fullname" . }}-gateway-plugins
             items:
               - key: config.yaml
                 path: config.yaml
-      {{- end }}
-      {{- if $tls.enabled }}
+        {{- end }}
+        {{- if or (and .Values.zen .Values.zen.enabled) (and .Values.mcpContextForge.sso .Values.mcpContextForge.sso.zen .Values.mcpContextForge.sso.zen.enabled) }}
+        - name: zen-jwt-public-key
+          secret:
+            secretName: zen-jwt-public-key
+            optional: true
+        {{- end }}
+        {{- if $tls.enabled }}
         - name: gateway-tls-certs
           secret:
             secretName: {{ required "mcpContextForge.tls.secretName is required when mcpContextForge.tls.enabled=true" $tls.secretName }}
-      {{- end }}
+        {{- end }}

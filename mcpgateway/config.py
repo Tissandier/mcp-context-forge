@@ -574,6 +574,24 @@ class Settings(BaseSettings):
     sso_generic_jwks_uri: Optional[str] = Field(default=None, description="OIDC JWKS endpoint URL for token signature verification")
 
     sso_generic_scope: Optional[str] = Field(default="openid profile email", description="OAuth scopes (space-separated)")
+    sso_generic_email_claim: str = Field(default="email", description="Userinfo claim to use as the user email (e.g. 'email', 'uid', 'preferred_username')")
+    sso_generic_email_domain: Optional[str] = Field(
+        default=None,
+        description="Fallback domain appended to the email_claim value when it contains no '@' (e.g. 'company.com'). Useful for providers like CPD that return a bare username instead of an email address.",
+    )
+    sso_generic_username_claim: str = Field(default="preferred_username", description="Userinfo claim to use as the username (e.g. 'preferred_username', 'uid')")
+    sso_generic_groups_claim: str = Field(default="groups", description="Userinfo claim containing group/role memberships")
+
+    # IBM Cloud Pak for Automation (ZenService) SSO Settings
+    sso_zen_enabled: bool = Field(default=False, description="Enable IBM Cloud Pak for Automation (ZenService) SSO")
+    sso_zen_cpd_host: Optional[str] = Field(default=None, description="CPD host (e.g. cpd-mcp-gateway.apps.cluster.example.com)")
+    sso_zen_public_key_path: str = Field(default="/etc/zen-jwt/public.pem", description="Path to Zen JWT RSA public key PEM file")
+    sso_zen_display_name: str = Field(default="IBM Cloud Pak for Automation", description="Display name shown on login page")
+    sso_zen_groups_claim: str = Field(default="groups", description="JWT claim for CPD groups")
+    sso_zen_role_mappings: Dict[str, str] = Field(default_factory=dict, description="Map CPD roles to CF roles (JSON: {role: cf_role})")
+    sso_zen_default_role: Optional[str] = Field(default=None, description="Default CF role for CPD users without role mapping")
+    sso_zen_email_domain: Optional[str] = Field(default=None, description="Domain to synthesize email from CPD username (e.g. 'company.com')")
+    sso_zen_cf_callback_base: Optional[str] = Field(default=None, description="Explicit CF base URL used in the CPD SSO redirect (e.g. http://localhost:8000). Auto-detected from request if unset.")
 
     sso_generic_groups_claim: str = Field(default="groups", description="JWT claim for Generic OIDC groups (groups/roles/custom)")
     sso_generic_admin_groups: Annotated[list[str], NoDecode] = Field(default_factory=list, description="Generic OIDC groups granting platform_admin role (CSV/JSON)")
