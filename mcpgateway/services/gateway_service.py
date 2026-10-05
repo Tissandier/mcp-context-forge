@@ -143,7 +143,7 @@ from mcpgateway.utils.retry_manager import ResilientHttpClient
 from mcpgateway.utils.services_auth import decode_auth, encode_auth
 from mcpgateway.utils.sqlalchemy_modifier import json_contains_tag_expr
 from mcpgateway.utils.ssl_context_cache import get_cached_ssl_context
-from mcpgateway.utils.subject_token import extract_subject_jwt
+from mcpgateway.utils.subject_token import extract_subject_jwt, looks_like_jwt
 from mcpgateway.utils.token_exchange_audit import audit_token_exchange
 from mcpgateway.utils.url_auth import apply_query_param_auth, sanitize_exception_message, sanitize_url_for_logging
 from mcpgateway.utils.validate_signature import validate_signature
@@ -903,7 +903,13 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         # auto-discover path applies to `issuer`. Raises ValueError on internal /
         # disallowed hosts.
         try:
-            SecurityValidator.validate_url(token_url, "OAuth token URL")
+            from urllib.parse import urlsplit  # pylint: disable=import-outside-toplevel
+            _turl_host = (urlsplit(token_url).hostname or "").lower()
+            _localhost_hosts = ("localhost", "127.0.0.1", "::1")
+            _skip = settings.ssrf_allow_localhost and _turl_host in _localhost_hosts
+            SecurityValidator.validate_url(token_url, "OAuth token URL", skip_ssrf=_skip)
+            if _skip:
+                logger.warning("Allowing localhost token-exchange token_url (SSRF_ALLOW_LOCALHOST=true): %s", token_url)
         except ValueError as e:
             # L7: a rejected token_url is a security-relevant config attempt; record it
             # (sanitized) so the security audit sees attempted SSRF-shaped configs.
@@ -1025,6 +1031,16 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
         falls back to forwarding the caller's raw JWT -- callers without a usable
         subject token get a failure, not a passthrough of unexchanged credentials.
 
+        Subject token resolution order:
+          1. ``X-Upstream-Authorization: Bearer <token>`` — when present and
+             JWT-shaped, use this value as the subject token. This lets callers
+             supply a distinct user JWT for the exchange (e.g. an IdP-issued token)
+             while the ``Authorization`` header still carries the internal gateway
+             JWT used for request authentication.
+          2. ``Authorization: Bearer <token>`` — the inbound request JWT (the
+             standard path when no ``X-Upstream-Authorization`` header is provided).
+          3. ``jwt_token`` cookie — Admin UI sessions that cannot attach a bearer.
+
         Args:
             oauth_config: Gateway OAuth configuration (grant_type == "token-exchange").
             gateway_id: Gateway identifier used as a cache key component.
@@ -1072,10 +1088,22 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             logger.debug("token-exchange short-circuited by negative cache for gateway %s", gateway_name, extra={"gateway_id": gateway_id})
             raise GatewayConnectionError(f"Token exchange unavailable for gateway '{gateway_name}'. Contact your administrator.")
 
-        # Subject token: Authorization bearer first, then the HttpOnly jwt_token
-        # cookie (Admin UI sessions cannot attach a bearer header). Both routes
-        # sit behind CSRF enforcement at the endpoint/middleware layer.
-        subject_token = extract_subject_jwt(request_headers or {})
+        # Subject token resolution: prefer X-Upstream-Authorization when the caller
+        # supplies a distinct IdP-issued JWT for the exchange while using their
+        # internal gateway JWT in Authorization for request authentication.
+        # Both headers sit behind CSRF enforcement at the endpoint/middleware layer.
+        rh_lower = {k.lower(): v for k, v in (request_headers or {}).items()}
+        upstream_auth = rh_lower.get("x-upstream-authorization")
+        subject_token: Optional[str] = None
+        if upstream_auth and isinstance(upstream_auth, str):
+            parts = upstream_auth.split(None, 1)
+            candidate = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else upstream_auth
+            if looks_like_jwt(candidate):
+                subject_token = candidate
+                logger.debug("token-exchange: using X-Upstream-Authorization as subject_token for gateway %s", gateway_name)
+        if not subject_token:
+            subject_token = extract_subject_jwt(request_headers or {})
+
         if not subject_token:
             raise GatewayConnectionError(f"User authentication required for token-exchange gateway '{gateway_name}'.")
 
@@ -4962,7 +4990,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             # Use isolated client for gateway health checks (each gateway may have custom CA cert)
             # Use admin timeout for health checks (fail fast, don't wait 120s for slow upstreams)
             # Pass ssl_context if present, otherwise let get_isolated_http_client use skip_ssl_verify setting
-            async with get_isolated_http_client(timeout=settings.httpx_admin_read_timeout, verify=ssl_context, follow_redirects=False) as client:
+            async with get_isolated_http_client(timeout=settings.httpx_admin_read_timeout, verify=ssl_context, follow_redirects=True) as client:
                 logger.debug("Checking health of gateway: %s (%s)", gateway_name, gateway_url_sanitized)
                 try:
                     # Handle different authentication types
@@ -5717,16 +5745,32 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                             # worker gets its own valid lock instance.
                             self._file_lock = FileLock(self._lock_path)
                             self._file_lock_pid = os.getpid()
+                        logger.debug(
+                            "[LOCK] PID %s attempting to acquire leader lock: %s",
+                            os.getpid(),
+                            self._lock_path,
+                        )
                         self._file_lock.acquire(timeout=0)
-                        logger.info("File lock acquired. Running health checks.")
+                        logger.info(
+                            "[LOCK] PID %s acquired leader lock. Starting maintenance cycle.",
+                            os.getpid(),
+                        )
                         await self._run_gateway_maintenance_cycle(user_email)
 
                     except Timeout:
-                        logger.debug("File lock already held. Retrying later.")
+                        logger.debug(
+                            "[LOCK] PID %s could not acquire leader lock (held by another worker). Retrying in %ss.",
+                            os.getpid(),
+                            self._health_check_interval,
+                        )
                         await asyncio.sleep(self._health_check_interval)
 
                     except Exception as e:
-                        logger.error("FileLock health check failed: %s", str(e))
+                        logger.error(
+                            "[LOCK] PID %s FileLock error: %s",
+                            os.getpid(),
+                            str(e),
+                        )
                         # Always back off here too - an unexpected acquire()/lock error
                         # must not spin the loop with no delay (busy-loops the event
                         # loop and can starve the worker of CPU needed to serve requests).
@@ -5736,9 +5780,16 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                         if self._file_lock.is_locked:
                             try:
                                 self._file_lock.release()
-                                logger.info("Released file lock.")
+                                logger.info(
+                                    "[LOCK] PID %s released leader lock.",
+                                    os.getpid(),
+                                )
                             except Exception as e:
-                                logger.warning("Failed to release file lock: %s", str(e))
+                                logger.warning(
+                                    "[LOCK] PID %s failed to release leader lock: %s",
+                                    os.getpid(),
+                                    str(e),
+                                )
 
             except Exception as e:
                 logger.error("Unexpected error in health check loop: %s", str(e))
@@ -6816,6 +6867,11 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 # return in _initialize_gateway, so the refresh reaches the MCP server instead
                 # of silently returning empty lists. An explicit caller-supplied Authorization
                 # header (checked above) always takes precedence over this OAuth lookup.
+                logger.debug(
+                    "[REFRESH] Resolving OAuth token for auth_code gateway %s (user=%s)",
+                    gateway_name,
+                    user_email,
+                )
                 oauth_result = await self._resolve_auth_code_refresh_headers(
                     gateway_id=gateway_id,
                     gateway_name=gateway_name,
@@ -6825,6 +6881,11 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     user_context=user_context,
                 )
                 pre_auth_headers = {**(pre_auth_headers or {}), **oauth_result.headers}
+                logger.debug(
+                    "[REFRESH] OAuth token resolved for gateway %s — Authorization header present: %s",
+                    gateway_name,
+                    any(k.lower() == "authorization" for k in pre_auth_headers),
+                )
 
             # Decrypt client_key for refresh initialization
             _refresh_key = refresh_client_key
@@ -6834,7 +6895,18 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     _refresh_key = _enc.decrypt_secret_or_plaintext(_refresh_key)
                 except Exception:
                     logger.debug("client_key decryption skipped during gateway refresh")
-            _capabilities, tools, resources, prompts, validation_errors = await self._initialize_gateway(
+
+            logger.info(
+                "[REFRESH] Calling _initialize_gateway for %s url=%s transport=%s auth_type=%s"
+                " timeout=%ss created_via=%s",
+                gateway_name,
+                sanitize_url_for_logging(gateway_url, auth_query_params_decrypted),
+                gateway_transport,
+                gateway_auth_type,
+                settings.gateway_async_lifecycle_attempt_timeout,
+                created_via,
+            )
+            _init_coro = self._initialize_gateway(
                 url=gateway_url,
                 authentication=gateway_auth_value,
                 transport=gateway_transport,
@@ -6848,8 +6920,31 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 client_cert=refresh_client_cert,
                 client_key=_refresh_key,
             )
+            try:
+                _capabilities, tools, resources, prompts, validation_errors = await asyncio.wait_for(
+                    _init_coro, timeout=settings.gateway_async_lifecycle_attempt_timeout
+                )
+            except asyncio.TimeoutError as exc:
+                _sanitized = sanitize_url_for_logging(gateway_url, auth_query_params_decrypted)
+                raise GatewayConnectionError(
+                    f"Gateway initialization timed out after {settings.gateway_async_lifecycle_attempt_timeout}s for {_sanitized}"
+                ) from exc
+            logger.info(
+                "[REFRESH] _initialize_gateway returned for %s — tools=%d resources=%d prompts=%d"
+                " capabilities=%s validation_errors=%d",
+                gateway_name,
+                len(tools),
+                len(resources),
+                len(prompts),
+                list(_capabilities.keys()) if _capabilities else [],
+                len(validation_errors),
+            )
         except Exception as e:
-            logger.warning("Failed to fetch tools from gateway %s: %s", gateway_name, e)
+            logger.warning(
+                "[REFRESH] Failed to fetch tools from gateway %s: %s",
+                gateway_name,
+                e,
+            )
             result["success"] = False
             result["error"] = str(e)
             return result
@@ -6858,7 +6953,12 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
         # Skip only if it's an auth_code gateway with no data (user may not have completed authorization)
         if not tools and not resources and not prompts and is_auth_code_gateway:
-            logger.debug("No tools/resources/prompts returned from auth_code gateway %s (user may not have authorized)", gateway_name)
+            logger.info(
+                "[REFRESH] Gateway %s returned empty tools/resources/prompts on auth_code path"
+                " (created_via=%s) — user may not have authorized yet",
+                gateway_name,
+                created_via,
+            )
             return result
 
         # For non-auth_code gateways, empty responses are legitimate and will clear stale items
@@ -7103,10 +7203,24 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
         # Check if lock is already held (concurrent refresh in progress)
         if lock.locked():
+            logger.warning(
+                "[REFRESH] Manual refresh for gateway %s (ID: %s) rejected — refresh already in progress",
+                gateway_name,
+                SecurityValidator.sanitize_log_message(gateway_id),
+            )
             raise GatewayError(f"Refresh already in progress for gateway {gateway_name}")
 
+        logger.info(
+            "[REFRESH] Manual refresh requested for gateway %s (ID: %s) by user=%s",
+            gateway_name,
+            SecurityValidator.sanitize_log_message(gateway_id),
+            user_email,
+        )
         async with lock:
-            logger.info("Starting manual refresh for gateway %s (ID: %s)", gateway_name, SecurityValidator.sanitize_log_message(gateway_id))
+            logger.info(
+                "[REFRESH] Acquired async refresh lock for gateway %s — starting _refresh_gateway_tools_resources_prompts",
+                gateway_name,
+            )
 
             result = await self._refresh_gateway_tools_resources_prompts(
                 gateway_id=gateway_id,
@@ -7119,6 +7233,22 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 user_context=user_context,
             )
             # Note: last_refresh_at is updated inside _refresh_gateway_tools_resources_prompts on success
+            logger.info(
+                "[REFRESH] _refresh_gateway_tools_resources_prompts completed for gateway %s"
+                " — success=%s tools(+%s/-%s/~%s) resources(+%s/-%s/~%s) prompts(+%s/-%s/~%s) error=%s",
+                gateway_name,
+                result.get("success"),
+                result.get("tools_added"),
+                result.get("tools_removed"),
+                result.get("tools_updated"),
+                result.get("resources_added"),
+                result.get("resources_removed"),
+                result.get("resources_updated"),
+                result.get("prompts_added"),
+                result.get("prompts_removed"),
+                result.get("prompts_updated"),
+                result.get("error"),
+            )
 
         result["duration_ms"] = (time.monotonic() - start_time) * 1000
         result["refreshed_at"] = datetime.now(timezone.utc)

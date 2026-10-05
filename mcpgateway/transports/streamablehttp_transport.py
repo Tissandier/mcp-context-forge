@@ -384,6 +384,25 @@ class OAuthAuthResult(Enum):
     NOT_APPLICABLE = "not_applicable"  # Target server does not use OAuth; caller should continue.
 
 
+def _is_localhost_url(url: str) -> bool:
+    """Return True when *url* targets a loopback address or ``localhost``.
+
+    Used to decide whether ``SSRF_ALLOW_LOCALHOST`` permits a non-HTTPS
+    authorization server or JWKS URI in development environments.
+
+    Args:
+        url: URL string to inspect.
+
+    Returns:
+        True if the host resolves to a loopback address, False otherwise.
+    """
+    try:
+        host = urlsplit(url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1")
+    except Exception:
+        return False
+
+
 def _resolve_authorization_servers(oauth_config: Dict[str, Any]) -> List[str]:
     """Normalise a virtual-server ``oauth_config`` into an issuer allowlist.
 
@@ -403,15 +422,21 @@ def _resolve_authorization_servers(oauth_config: Dict[str, Any]) -> List[str]:
         if cleaned:
             non_https = [s for s in cleaned if not s.lower().startswith("https://")]
             if non_https:
-                logger.warning("Ignoring non-HTTPS authorization_servers (SSRF risk): %s", non_https)
-                cleaned = [s for s in cleaned if s.lower().startswith("https://")]
+                if settings.ssrf_allow_localhost and all(_is_localhost_url(s) for s in non_https):
+                    logger.warning("Allowing non-HTTPS localhost authorization_servers (SSRF_ALLOW_LOCALHOST=true): %s", non_https)
+                else:
+                    logger.warning("Ignoring non-HTTPS authorization_servers (SSRF risk): %s", non_https)
+                    cleaned = [s for s in cleaned if s.lower().startswith("https://")]
             return cleaned
     singular = oauth_config.get("authorization_server")
     if isinstance(singular, str) and singular.strip():
         url = singular.strip()
         if not url.lower().startswith("https://"):
-            logger.warning("Ignoring non-HTTPS authorization_server (SSRF risk): %s", url)
-            return []
+            if settings.ssrf_allow_localhost and _is_localhost_url(url):
+                logger.warning("Allowing non-HTTPS localhost authorization_server (SSRF_ALLOW_LOCALHOST=true): %s", url)
+            else:
+                logger.warning("Ignoring non-HTTPS authorization_server (SSRF risk): %s", url)
+                return []
         return [url]
     return []
 
